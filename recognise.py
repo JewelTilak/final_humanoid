@@ -1,3 +1,5 @@
+
+
 from pathlib import Path
 import numpy as np
 import cv2
@@ -5,18 +7,7 @@ import pyttsx3
 import sys
 
 
-# if getattr(sys, 'frozen', False):
-#     BASE_DIR = Path(sys._MEIPASS)  # PyInstaller temp directory
-# else:
-#     BASE_DIR = Path(__file__).resolve().parent
-
-if getattr(sys, 'frozen', False):
-    BASE_DIR = Path(sys.executable).parent  # where the binary is located
-else:
-    BASE_DIR = Path(__file__).resolve().parent
-
-
-
+BASE_DIR = Path(__file__).resolve().parent
 dataset_path = BASE_DIR / "data"
 assets_path = BASE_DIR / "assets"
 
@@ -26,6 +17,7 @@ configFile = str(assets_path / "deploy.prototxt")
 
 def distance(v1, v2):
     return np.sqrt(((v1 - v2) ** 2).sum())
+    
 
 def knn(train, test, k=5):
     dist = []
@@ -39,6 +31,7 @@ def knn(train, test, k=5):
     output = np.unique(labels, return_counts=True)
     index = np.argmax(output[1])
     return output[0][index]
+
 
 
 net = cv2.dnn.readNetFromCaffe(configFile, modelFile)
@@ -77,15 +70,49 @@ print("\n Training data loaded successfully!")
 print("   Face dataset shape:", face_dataset.shape)
 print("   Face labels shape:", face_labels.shape)
 
+
 engine = pyttsx3.init()
 engine.setProperty('rate', 150)
 engine.setProperty('volume', 1.0)
 spoken_names = set()
 
+
+USE_LBPH = True   # Set to False to disable LBPH
+
+if USE_LBPH:
+    print("\nInitializing LBPH recognizer (tuned parameters)...")
+    lbph = cv2.face.LBPHFaceRecognizer_create(
+        radius=1,        # Slightly larger radius for lighting robustness
+        neighbors=8,
+        grid_x=8,
+        grid_y=8,
+        threshold=70.0  # Adjust for your dataset
+    )
+    # Prepare data for LBPH training (grayscale images)
+    faces, face_ids = [], []
+    for file in dataset_path.glob("*.npy"):
+        current_id = [key for key, name in names.items() if name == file.stem][0]
+        data = np.load(file)
+        for img in data:
+            if len(img.shape) == 3:  # Color image
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:  # Already grayscale
+                gray = img
+
+            gray = cv2.equalizeHist(gray)
+            faces.append(gray)
+            face_ids.append(current_id)
+    if faces:
+        lbph.train(faces, np.array(face_ids))
+        print("LBPH training complete!")
+
+
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("Cannot access webcam. Try changing the camera index.")
     sys.exit()
+
+print("\nPress 'r' to reset spoken names, 'q' to quit.\n")
 
 while True:
     ret, frame = cap.read()
@@ -110,17 +137,33 @@ while True:
             face_section = frame[y1:y2, x1:x2]
             if face_section.size == 0:
                 continue
-            face_section = cv2.resize(face_section, (100, 100))
 
-            out = knn(trainset, face_section.flatten())
-            pred_name = names[int(out)]
+            # -----------------------------
+            # Normalize face
+            # -----------------------------
+            face_section = cv2.cvtColor(face_section, cv2.COLOR_BGR2GRAY)
+            face_section = cv2.equalizeHist(face_section)
+            face_section = cv2.resize(face_section, (128, 128))
+
+            # -----------------------------
+            # Predict using LBPH or KNN
+            # -----------------------------
+            if USE_LBPH:
+                label, confidence_value = lbph.predict(face_section)
+                if label >= 0 and confidence_value < 150:
+                    pred_name = names[label]
+                else:
+                    pred_name = names.get(label, "Unknown")
+            else:
+                out = knn(trainset, face_section.flatten())
+                pred_name = names[int(out)]
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
             cv2.putText(frame, f"{pred_name} ({confidence * 100:.1f}%)",
                         (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (255, 0, 0), 2)
 
-            if pred_name not in spoken_names:
+            if pred_name not in spoken_names and pred_name != "Unknown":
                 engine.say(f"Hi {pred_name}. Welcome to Utpal Shanghvi Global School!")
                 engine.runAndWait()
                 spoken_names.add(pred_name)
@@ -136,3 +179,4 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
